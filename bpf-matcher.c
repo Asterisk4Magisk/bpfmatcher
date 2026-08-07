@@ -23,7 +23,7 @@
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define LOG_BUF_SIZE 65536
 #define MAX_UIDS 8192
-#define MAX_CIDR_MAP_ENTRIES 16384
+#define MAX_DIRECT_CIDR_MAP_ENTRIES 32768
 #define MAX_PATH_LEN 512
 #define XT_BPF_NOMATCH 0U
 #define XT_BPF_MATCH 0xffffU
@@ -911,7 +911,7 @@ static int start_matcher(const char *policy_path) {
             BPF_MAP_TYPE_LPM_TRIE,
             sizeof(struct lpm4_key),
             sizeof(uint8_t),
-            MAX_CIDR_MAP_ENTRIES,
+            MAX_DIRECT_CIDR_MAP_ENTRIES,
             BPF_F_NO_PREALLOC
         );
         if (policy.enable_ipv6) {
@@ -919,7 +919,7 @@ static int start_matcher(const char *policy_path) {
                 BPF_MAP_TYPE_LPM_TRIE,
                 sizeof(struct lpm6_key),
                 sizeof(uint8_t),
-                MAX_CIDR_MAP_ENTRIES,
+                MAX_DIRECT_CIDR_MAP_ENTRIES,
                 BPF_F_NO_PREALLOC
             );
         }
