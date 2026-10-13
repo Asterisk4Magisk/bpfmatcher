@@ -68,6 +68,7 @@ struct policy {
     bool enable_ipv6;
     char direct_cidr_path_v4[MAX_PATH_LEN];
     char direct_cidr_path_v6[MAX_PATH_LEN];
+    char xt_dns_uid_program_path[MAX_PATH_LEN];
     char xt_output_v4_program_path[MAX_PATH_LEN];
     char xt_output_v6_program_path[MAX_PATH_LEN];
     char xt_prerouting_v4_program_path[MAX_PATH_LEN];
@@ -86,10 +87,12 @@ struct lpm6_key {
     uint8_t addr[16];
 };
 
+static int xt_dns_uid_fd = -1;
 static int xt_output_v4_fd = -1;
 static int xt_output_v6_fd = -1;
 static int xt_prerouting_v4_fd = -1;
 static int xt_prerouting_v6_fd = -1;
+static char active_xt_dns_uid_program_path[MAX_PATH_LEN];
 static char active_xt_output_v4_program_path[MAX_PATH_LEN];
 static char active_xt_output_v6_program_path[MAX_PATH_LEN];
 static char active_xt_prerouting_v4_program_path[MAX_PATH_LEN];
@@ -297,7 +300,13 @@ static bool load_policy(const char *path, struct policy *policy) {
         sizeof(policy->xt_prerouting_v6_program_path)
     );
     json_uint_array(json, "uids", policy->uids, &policy->uid_count);
+    json_string(json, "xtDnsUidProgramPath", policy->xt_dns_uid_program_path,
+        sizeof(policy->xt_dns_uid_program_path));
     free(json);
+    if (policy->xt_dns_uid_program_path[0] != '\0' &&
+        !is_absolute_bounded_path(policy->xt_dns_uid_program_path)) {
+        return false;
+    }
     if (!program_paths_ok ||
         !is_absolute_bounded_path(policy->xt_output_v4_program_path) ||
         !is_absolute_bounded_path(policy->xt_output_v6_program_path) ||
@@ -626,10 +635,12 @@ static void close_fd(int *fd) {
 }
 
 static void cleanup_attaches(void) {
+    if (active_xt_dns_uid_program_path[0] != '\0') unlink(active_xt_dns_uid_program_path);
     if (active_xt_output_v4_program_path[0] != '\0') unlink(active_xt_output_v4_program_path);
     if (active_xt_output_v6_program_path[0] != '\0') unlink(active_xt_output_v6_program_path);
     if (active_xt_prerouting_v4_program_path[0] != '\0') unlink(active_xt_prerouting_v4_program_path);
     if (active_xt_prerouting_v6_program_path[0] != '\0') unlink(active_xt_prerouting_v6_program_path);
+    close_fd(&xt_dns_uid_fd);
     close_fd(&xt_output_v4_fd);
     close_fd(&xt_output_v6_fd);
     close_fd(&xt_prerouting_v4_fd);
@@ -887,6 +898,8 @@ static int start_matcher(const char *policy_path) {
         return 2;
     }
     snprintf(active_xt_output_v4_program_path, sizeof(active_xt_output_v4_program_path), "%s", policy.xt_output_v4_program_path);
+    snprintf(active_xt_dns_uid_program_path, sizeof(active_xt_dns_uid_program_path),
+        "%s", policy.xt_dns_uid_program_path);
     snprintf(active_xt_output_v6_program_path, sizeof(active_xt_output_v6_program_path), "%s", policy.xt_output_v6_program_path);
     snprintf(
         active_xt_prerouting_v4_program_path,
@@ -1005,10 +1018,21 @@ static int start_matcher(const char *policy_path) {
         }
     }
 
+    close_fd(&xt_dns_uid_fd);
     close_fd(&xt_output_v4_fd);
     close_fd(&xt_output_v6_fd);
     close_fd(&xt_prerouting_v4_fd);
     close_fd(&xt_prerouting_v6_fd);
+    if (policy.xt_dns_uid_program_path[0] != '\0') {
+        // UID-only: no packet access, so the same program serves both families.
+        xt_dns_uid_fd = load_xt_filter_prog_with_fallback(policy.mode, uid_fd, -1,
+            true, false, AF_INET, "ast_xt_dns_uid");
+        if (xt_dns_uid_fd < 0 || pin_bpf_object(xt_dns_uid_fd, policy.xt_dns_uid_program_path) != 0) {
+            cleanup_attaches();
+            return 2;
+        }
+        close_fd(&xt_dns_uid_fd);
+    }
     close_fd(&uid_fd);
     close_fd(&direct4_fd);
     close_fd(&direct6_fd);
@@ -1018,6 +1042,8 @@ static int start_matcher(const char *policy_path) {
 static int stop_matcher(const char *policy_path) {
     struct policy policy;
     if (!load_policy(policy_path, &policy)) return 2;
+    snprintf(active_xt_dns_uid_program_path, sizeof(active_xt_dns_uid_program_path),
+        "%s", policy.xt_dns_uid_program_path);
     snprintf(
         active_xt_output_v4_program_path,
         sizeof(active_xt_output_v4_program_path),
