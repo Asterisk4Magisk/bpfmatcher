@@ -165,12 +165,33 @@ static int load_prog(
     attr.log_level = 1;
     snprintf(attr.prog_name, BPF_OBJ_NAME_LEN, "%s", name);
     int fd = (int)bpf_sys(BPF_PROG_LOAD, &attr, sizeof(attr));
+    /* Older kernels reject the optional program name in the load attributes. */
+    if (fd < 0 && (errno == E2BIG || errno == EINVAL)) {
+        memset(attr.prog_name, 0, sizeof(attr.prog_name));
+        log_buf[0] = '\0';
+        fd = (int)bpf_sys(BPF_PROG_LOAD, &attr, sizeof(attr));
+    }
     if (fd < 0 && log_error) {
         fprintf(stderr, "%s load failed: errno=%d (%s)\n%s verifier log:\n%s\n",
                 name, errno, strerror(errno), name, log_buf);
     }
     return fd;
 }
+
+static bool has_program_verification_info(int fd) {
+    // Keep the request zeroed so older kernels can report their shorter layout.
+    struct bpf_prog_info info = {0};
+    union bpf_attr attr = {0};
+    attr.info.bpf_fd = (uint32_t)fd;
+    attr.info.info_len = sizeof(info);
+    attr.info.info = (uint64_t)(uintptr_t)&info;
+    return bpf_sys(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr)) == 0 &&
+        attr.info.info_len >= offsetof(struct bpf_prog_info, name) + sizeof(info.name) &&
+        info.name[0] != '\0';
+}
+
+static const char program_verification_error[] =
+    "Kernel cannot report eBPF program names and map IDs required for matcher verification";
 
 static char *read_file(const char *path) {
     FILE *file = fopen(path, "rb");
@@ -725,6 +746,16 @@ static int probe_json(const char *bpf_directory, bool need_ipv6) {
             );
         }
         xt_output_v4_prog_ok = probe_xt_output_v4_fd >= 0;
+        if (xt_output_v4_prog_ok && !has_program_verification_info(probe_xt_output_v4_fd)) {
+            printf("{\"supported\":false,\"message\":\"%s\",\"checks\":["
+                   "{\"name\":\"bpf-program-verification\",\"supported\":false}]}\n",
+                program_verification_error);
+            close_fd(&probe_xt_output_v4_fd);
+            close_fd(&hash_fd);
+            close_fd(&lpm4_fd);
+            close_fd(&lpm6_fd);
+            return 1;
+        }
         if (xt_output_v4_prog_ok) {
             xt_output_v4_pin_ok = pin_bpf_object(probe_xt_output_v4_fd, probe_xt_output_v4_program_path) == 0;
             unlink(probe_xt_output_v4_program_path);
@@ -957,6 +988,14 @@ static int start_matcher(const char *policy_path) {
         "ast_xt_out4"
     );
     if (xt_output_v4_fd < 0) {
+        return 2;
+    }
+    if (!has_program_verification_info(xt_output_v4_fd)) {
+        fprintf(stderr, "%s\n", program_verification_error);
+        close_fd(&xt_output_v4_fd);
+        close_fd(&uid_fd);
+        close_fd(&direct4_fd);
+        close_fd(&direct6_fd);
         return 2;
     }
     if (pin_bpf_object(xt_output_v4_fd, policy.xt_output_v4_program_path) != 0) {
